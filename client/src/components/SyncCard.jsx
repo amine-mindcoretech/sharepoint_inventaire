@@ -4,7 +4,7 @@ import { Card, CardContent, Typography, Button, CircularProgress, Box } from '@m
 import { CheckCircle, Error } from '@mui/icons-material';
 import axios from 'axios';
 
-function SyncCard({ title, endpoint }) {
+function SyncCard({ title, endpoint, prefix }) {
   const [status, setStatus] = useState(null);
   const [message, setMessage] = useState('');
   const [duration, setDuration] = useState(null);
@@ -17,17 +17,21 @@ function SyncCard({ title, endpoint }) {
     setDuration(null);
 
     try {
-      const response = await axios.get(`http://localhost:5000/api/sharepoint-tbl-invitems-locori${endpoint}`);
+      const response = await axios.get(`http://localhost:5000${prefix}${endpoint}`);
       setStatus('success');
       setMessage(response.data.message);
-      if (response.data.deletionDuration) {
+      if (response.data.deletionDuration || response.data.insertionDuration) {
+        const deletionMinutes = Math.floor(response.data.deletionDuration / 1000 / 60);
+        const deletionSeconds = Math.floor((response.data.deletionDuration / 1000) % 60);
+        const insertionMinutes = Math.floor(response.data.insertionDuration / 1000 / 60);
+        const insertionSeconds = Math.floor((response.data.insertionDuration / 1000) % 60);
         setDuration(
-          `Deletion: ${Math.floor(response.data.deletionDuration / 1000)}s, Insertion: ${Math.floor(response.data.insertionDuration / 1000)}s`
+          `Suppression: ${deletionMinutes} minute(s) et ${deletionSeconds} seconde(s), Insertion: ${insertionMinutes} minute(s) et ${insertionSeconds} seconde(s)`
         );
       }
     } catch (error) {
       setStatus('error');
-      setMessage(error.response?.data?.error || 'An error occurred');
+      setMessage(error.response?.data?.error || 'Une erreur est survenue. Les opérations ont été relancées jusqu\'à 10 fois en cas d\'échec.');
     } finally {
       setLoading(false);
     }
@@ -46,7 +50,7 @@ function SyncCard({ title, endpoint }) {
           disabled={loading}
           startIcon={loading ? <CircularProgress size={20} /> : null}
         >
-          {loading ? 'Running...' : 'Run'}
+          {loading ? 'En cours...' : 'Exécuter'}
         </Button>
         {status && (
           <Box mt={2} display="flex" alignItems="center">

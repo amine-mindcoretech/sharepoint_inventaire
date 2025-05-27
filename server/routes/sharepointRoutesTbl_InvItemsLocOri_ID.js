@@ -1,3 +1,4 @@
+// routes/sharepointRoutesTbl_InvItemsLocOri_ID.js
 const express = require('express');
 const { syncSharePointData, syncSharePointItemsData, syncGeniusData, syncGeniusItemsData, replaceSharePointWithGeniusInvItems, replaceSharePointWithGeniusItems } = require('../controllers/sharepointControllerTbl_InvItemsLocOri_ID');
 const notifyByEmail = require('../utils/sendErrorEmail');
@@ -46,8 +47,12 @@ router.get('/sync-sharepoint-Tbl-Items', async (req, res) => {
 
 router.get('/replace-with-genius-Tbl-InvItemsLocOri', async (req, res) => {
     try {
-        const { deletionDuration, insertionDuration } = await replaceSharePointWithGeniusInvItems();
-        res.status(200).json({ message: '✅ Remplacement SharePoint par Genius Tbl_InvItemsLocOri terminé !', deletionDuration, insertionDuration });
+        const result = await replaceSharePointWithGeniusInvItems();
+        res.status(200).json({
+            message: result.message,
+            deletionDuration: result.deletionDuration,
+            insertionDuration: result.insertionDuration
+        });
     } catch (error) {
         await notifyByEmail('❌ Erreur lors du remplacement SharePoint par Genius (Tbl_InvItemsLocOri)', error.message);
         res.status(500).json({ error: '❌ Échec du remplacement SharePoint par Genius Tbl_InvItemsLocOri.' });
@@ -56,8 +61,12 @@ router.get('/replace-with-genius-Tbl-InvItemsLocOri', async (req, res) => {
 
 router.get('/replace-with-genius-Tbl-Items', async (req, res) => {
     try {
-        const { deletionDuration, insertionDuration } = await replaceSharePointWithGeniusItems();
-        res.status(200).json({ message: '✅ Remplacement SharePoint par Genius Tbl_Items terminé !', deletionDuration, insertionDuration });
+        const result = await replaceSharePointWithGeniusItems();
+        res.status(200).json({
+            message: result.message,
+            deletionDuration: result.deletionDuration,
+            insertionDuration: result.insertionDuration
+        });
     } catch (error) {
         await notifyByEmail('❌ Erreur lors du remplacement SharePoint par Genius (Tbl_Items)', error.message);
         res.status(500).json({ error: '❌ Échec du remplacement SharePoint par Genius Tbl_Items.' });

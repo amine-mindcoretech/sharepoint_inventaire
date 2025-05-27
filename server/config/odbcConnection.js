@@ -1,3 +1,4 @@
+//config/odbcConnection.js
 const odbc = require('odbc');
 
 async function connectODBC() {

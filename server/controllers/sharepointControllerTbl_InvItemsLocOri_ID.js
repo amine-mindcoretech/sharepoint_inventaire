@@ -1,3 +1,4 @@
+//// controllers/sharepointControllerTbl_InvItemsLocOri_ID.js
 const axios = require('axios');
 const qs = require('qs');
 const db = require('../config/db');
@@ -9,6 +10,7 @@ let ACCESS_TOKEN = null;
 let tokenExpiry = null;
 const LIST_ID_INV_ITEMS = process.env.SHAREPOINT_LIST_Tbl_InvItemsLocOri_ID;
 const LIST_ID_ITEMS = process.env.SHAREPOINT_LIST_Tbl_Items;
+const LIST_ID_LOC = process.env.SHAREPOINT_LIST_Tbl_Loc;
 const SITE_ID = process.env.SHAREPOINT_SITE_ID;
 
 // Generate Microsoft Graph API access token
@@ -61,7 +63,11 @@ const fieldMappingsItems = {
     field_7: 'Unit',
     field_8: 'UnitDesc'
 };
-
+const fieldMappingsLoc = { // New mapping for Tbl_Loc
+    Title: 'Code',
+    field_1: 'Location',
+    field_2: 'Des'
+};
 const isValidISODate = (val) => {
     return typeof val === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:Z)?$/.test(val);
 };
@@ -151,10 +157,10 @@ const formatDuration = (ms) => {
 
 const wait = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-const MAX_RETRIES = 5;
-const INITIAL_DELAY_MS = 2000;
+const MAX_RETRIES = 10;
+const INITIAL_DELAY_MS = 5000;
 const BATCH_SIZE = 20;
-const BATCH_DELAY_MS = 1000;
+const BATCH_DELAY_MS = 2000;
 
 // SharePoint and Genius Sync Functions
 const syncSharePointData = async () => {
@@ -363,7 +369,7 @@ const syncGeniusItemsData = async () => {
 
             const cp850Decoded = decodeWith('cp850');
             return {
-                Title: cp850Decoded.item,
+                Title: cp850Decoded.ItemID,
                 item: cp850Decoded.item,
                 Family: cp850Decoded.Family,
                 Description: cp850Decoded.Description1,
@@ -467,7 +473,6 @@ const addSharePointItem = async (itemData, listType = 'InvItems') => {
 const replaceSharePointWithGeniusInvItems = async () => {
     const tableName = 'genius_Tbl_InvItemsLocOri';
     const listId = LIST_ID_INV_ITEMS;
-    const startTime = Date.now();
     let deletionDuration = 0;
     let insertionDuration = 0;
 
@@ -486,60 +491,48 @@ const replaceSharePointWithGeniusInvItems = async () => {
         }
 
         if (items.length > 0) {
-            for (let i = 0; i < items.length; i += BATCH_SIZE) {
-                const batchItems = items.slice(i, i + BATCH_SIZE);
+            for (let i = 0; i < items.length; i++) {
+                const item = items[i];
                 let attempt = 0;
-                let batchSuccess = false;
+                let success = false;
 
-                while (attempt < MAX_RETRIES && !batchSuccess) {
+                while (attempt < MAX_RETRIES && !success) {
                     try {
-                        const batchRequest = {
-                            requests: batchItems.map((item, index) => ({
-                                id: `${index}`,
-                                method: 'DELETE',
-                                url: `/sites/${SITE_ID}/lists/${listId}/items/${item.id}`
-                            }))
-                        };
-
-                        const batchResponse = await axios.post('https://graph.microsoft.com/v1.0/$batch', batchRequest, { headers });
-                        let allDeleted = true;
-                        batchResponse.data.responses.forEach((resp, idx) => {
-                            if (resp.status === 204) {
-                                console.log(`✅ Item ${batchItems[idx].id} supprimé de SharePoint (InvItems).`);
-                            } else if (resp.status === 429 || (resp.body?.error?.code === 'activityLimitReached')) {
-                                allDeleted = false;
-                                throw new Error('Throttled');
-                            } else if (resp.body?.error?.code === 'itemNotFound') {
-                                console.log(`⚠️ Item ${batchItems[idx].id} non trouvé, ignoré (InvItems).`);
-                            } else {
-                                allDeleted = false;
-                                console.error(`❌ Échec de suppression de l'item ${batchItems[idx].id} (InvItems):`, resp.body?.error || resp.status);
-                                throw new Error(`Échec de suppression: ${resp.body?.error?.message || resp.status}`);
-                            }
-                        });
-                        if (allDeleted) batchSuccess = true;
+                        await axios.delete(
+                            `https://graph.microsoft.com/v1.0/sites/${SITE_ID}/lists/${listId}/items/${item.id}`,
+                            { headers }
+                        );
+                        console.log(`✅ Item ${item.id} supprimé de SharePoint (InvItems).`);
+                        success = true;
                     } catch (error) {
                         attempt++;
                         if (attempt === MAX_RETRIES) {
-                            console.error(`❌ Échec final de suppression du batch ${Math.floor(i / BATCH_SIZE) + 1} (InvItems) après ${MAX_RETRIES} tentatives:`, error.message);
-                            throw error;
+                            throw new Error(`Échec final de suppression de l'item ${item.id} après ${MAX_RETRIES} tentatives: ${error.message}`);
                         }
-                        if (error.message !== 'Throttled') {
-                            console.log(`⚠️ Erreur non récupérable, passage au batch suivant (InvItems).`);
-                            batchSuccess = true;
-                        } else {
+                        if (error.response?.status === 429 || error.response?.data?.error?.code === 'activityLimitReached') {
                             const delay = INITIAL_DELAY_MS * Math.pow(2, attempt - 1);
-                            console.log(`⚠️ Throttling détecté. Retente ${attempt}/${MAX_RETRIES} après ${delay}ms...`);
+                            console.log(`⚠️ Throttling détecté. Attente de ${delay}ms avant la tentative ${attempt + 1}/${MAX_RETRIES}...`);
                             await wait(delay);
+                        } else {
+                            throw error;
                         }
                     }
                 }
-                if (i + BATCH_SIZE < items.length) {
-                    console.log(`⏳ Pause de ${BATCH_DELAY_MS}ms avant le prochain batch de suppression (InvItems)...`);
-                    await wait(BATCH_DELAY_MS);
-                }
+                // Removed the delay here: if (i < items.length - 1) await wait(BATCH_DELAY_MS);
             }
-            console.log(`✅ Tous les items SharePoint (InvItems) ont été traités (quelques suppressions ignorées si non trouvées).`);
+
+            // Verify deletion
+            let remainingItems = [];
+            url = `https://graph.microsoft.com/v1.0/sites/${SITE_ID}/lists/${listId}/items?expand=fields`;
+            while (url) {
+                const response = await axios.get(url, { headers });
+                remainingItems = remainingItems.concat(response.data.value);
+                url = response.data['@odata.nextLink'];
+            }
+            if (remainingItems.length > 0) {
+                throw new Error(`Échec de suppression complète: ${remainingItems.length} items restants. IDs restants: ${remainingItems.map(item => item.id).join(', ')}`);
+            }
+            console.log(`✅ Confirmation: Aucun item restant dans SharePoint (InvItems).`);
         } else {
             console.log(`⚠️ Aucun item à supprimer dans SharePoint (InvItems).`);
         }
@@ -550,76 +543,62 @@ const replaceSharePointWithGeniusInvItems = async () => {
         const insertionStart = Date.now();
         const [geniusData] = await db.execute(`SELECT * FROM ${tableName}`);
         if (geniusData.length === 0) {
-            console.log(`⚠️ Aucune donnée trouvée dans la table ${tableName}.`);
             insertionDuration = Date.now() - insertionStart;
-            console.log(`⏱️ Temps d'insertion (InvItems): ${formatDuration(insertionDuration)}`);
-            return { deletionDuration, insertionDuration };
+            return {
+                message: `⚠️ Aucune donnée trouvée dans la table ${tableName}.`,
+                deletionDuration,
+                insertionDuration
+            };
         }
 
-        for (let i = 0; i < geniusData.length; i += BATCH_SIZE) {
-            const batchItems = geniusData.slice(i, i + BATCH_SIZE);
+        for (let i = 0; i < geniusData.length; i++) {
+            const item = geniusData[i];
             let attempt = 0;
-            let batchSuccess = false;
+            let success = false;
 
-            while (attempt < MAX_RETRIES && !batchSuccess) {
+            while (attempt < MAX_RETRIES && !success) {
                 try {
-                    const batchRequest = {
-                        requests: batchItems.map((item, index) => {
-                            const fields = {
-                                Title: item.Titre,
-                                field_1: item.Location,
-                                field_2: item.Item,
-                                field_3: item.description,
-                                field_4: Number(item.qte),
-                                field_5: Number(item.Prix_Der),
-                                field_6: item.DateIMPFromGenuis ? new Date(item.DateIMPFromGenuis).toISOString() : new Date().toISOString()
-                            };
-                            return {
-                                id: `${index}`,
-                                method: 'POST',
-                                url: `/sites/${SITE_ID}/lists/${listId}/items`,
-                                headers: { 'Content-Type': 'application/json' },
-                                body: { fields }
-                            };
-                        })
+                    const fields = {
+                        Title: item.Titre,
+                        field_1: item.Location,
+                        field_2: item.Item,
+                        field_3: item.description,
+                        field_4: Number(item.qte),
+                        field_5: Number(item.Prix_Der),
+                        field_6: item.DateIMPFromGenuis ? new Date(item.DateIMPFromGenuis).toISOString() : new Date().toISOString()
                     };
-
-                    const batchResponse = await axios.post('https://graph.microsoft.com/v1.0/$batch', batchRequest, { headers });
-                    let allInserted = true;
-                    batchResponse.data.responses.forEach((resp, idx) => {
-                        if (resp.status === 201) {
-                            console.log(`✅ Item inséré dans SharePoint (InvItems): ${batchItems[idx].Titre}`);
-                        } else if (resp.status === 429 || (resp.body?.error?.code === 'activityLimitReached')) {
-                            allInserted = false;
-                            throw new Error('Throttled');
-                        } else {
-                            allInserted = false;
-                            console.error(`❌ Échec de l'insertion de l'item (InvItems):`, resp.body?.error || resp.status);
-                            throw new Error(`Échec de l'insertion: ${resp.body?.error?.message || resp.status}`);
-                        }
-                    });
-                    if (allInserted) batchSuccess = true;
+                    await axios.post(
+                        `https://graph.microsoft.com/v1.0/sites/${SITE_ID}/lists/${listId}/items`,
+                        { fields },
+                        { headers }
+                    );
+                    console.log(`✅ Item ${item.Titre} inséré dans SharePoint (InvItems).`);
+                    success = true;
                 } catch (error) {
                     attempt++;
                     if (attempt === MAX_RETRIES) {
-                        console.error(`❌ Échec final de l'insertion du batch ${Math.floor(i / BATCH_SIZE) + 1} (InvItems) après ${MAX_RETRIES} tentatives:`, error.message);
+                        throw new Error(`Échec final de l'insertion de l'item ${item.Titre} après ${MAX_RETRIES} tentatives: ${error.message}`);
+                    }
+                    if (error.response?.status === 429 || error.response?.data?.error?.code === 'activityLimitReached') {
+                        const delay = INITIAL_DELAY_MS * Math.pow(2, attempt - 1);
+                        console.log(`⚠️ Throttling détecté. Attente de ${delay}ms avant la tentative ${attempt + 1}/${MAX_RETRIES}...`);
+                        await wait(delay);
+                    } else {
                         throw error;
                     }
-                    const delay = INITIAL_DELAY_MS * Math.pow(2, attempt - 1);
-                    console.log(`⚠️ Throttling détecté. Retente ${attempt}/${MAX_RETRIES} après ${delay}ms...`);
-                    await wait(delay);
                 }
             }
-            if (i + BATCH_SIZE < geniusData.length) {
-                console.log(`⏳ Pause de ${BATCH_DELAY_MS}ms avant le prochain batch d'insertion (InvItems)...`);
-                await wait(BATCH_DELAY_MS);
-            }
+            // Removed the delay here: if (i < geniusData.length - 1) await wait(BATCH_DELAY_MS);
         }
         console.log(`✅ ${geniusData.length} items de ${tableName} insérés dans SharePoint (InvItems).`);
         insertionDuration = Date.now() - insertionStart;
         console.log(`⏱️ Temps d'insertion (InvItems): ${formatDuration(insertionDuration)}`);
 
-        return { deletionDuration, insertionDuration };
+        return {
+            message: `✅ ${geniusData.length} items insérés avec succès`,
+            deletionDuration,
+            insertionDuration
+        };
     } catch (error) {
         console.error(`❌ Erreur lors de la synchronisation Genius avec SharePoint (InvItems):`, error.message);
         throw error;
@@ -629,7 +608,6 @@ const replaceSharePointWithGeniusInvItems = async () => {
 const replaceSharePointWithGeniusItems = async () => {
     const tableName = 'genius_Tbl_Items';
     const listId = LIST_ID_ITEMS;
-    const startTime = Date.now();
     let deletionDuration = 0;
     let insertionDuration = 0;
 
@@ -648,60 +626,48 @@ const replaceSharePointWithGeniusItems = async () => {
         }
 
         if (items.length > 0) {
-            for (let i = 0; i < items.length; i += BATCH_SIZE) {
-                const batchItems = items.slice(i, i + BATCH_SIZE);
+            for (let i = 0; i < items.length; i++) {
+                const item = items[i];
                 let attempt = 0;
-                let batchSuccess = false;
+                let success = false;
 
-                while (attempt < MAX_RETRIES && !batchSuccess) {
+                while (attempt < MAX_RETRIES && !success) {
                     try {
-                        const batchRequest = {
-                            requests: batchItems.map((item, index) => ({
-                                id: `${index}`,
-                                method: 'DELETE',
-                                url: `/sites/${SITE_ID}/lists/${listId}/items/${item.id}`
-                            }))
-                        };
-
-                        const batchResponse = await axios.post('https://graph.microsoft.com/v1.0/$batch', batchRequest, { headers });
-                        let allDeleted = true;
-                        batchResponse.data.responses.forEach((resp, idx) => {
-                            if (resp.status === 204) {
-                                console.log(`✅ Item ${batchItems[idx].id} supprimé de SharePoint (Items).`);
-                            } else if (resp.status === 429 || (resp.body?.error?.code === 'activityLimitReached')) {
-                                allDeleted = false;
-                                throw new Error('Throttled');
-                            } else if (resp.body?.error?.code === 'itemNotFound') {
-                                console.log(`⚠️ Item ${batchItems[idx].id} non trouvé, ignoré (Items).`);
-                            } else {
-                                allDeleted = false;
-                                console.error(`❌ Échec de suppression de l'item ${batchItems[idx].id} (Items):`, resp.body?.error || resp.status);
-                                throw new Error(`Échec de suppression: ${resp.body?.error?.message || resp.status}`);
-                            }
-                        });
-                        if (allDeleted) batchSuccess = true;
+                        await axios.delete(
+                            `https://graph.microsoft.com/v1.0/sites/${SITE_ID}/lists/${listId}/items/${item.id}`,
+                            { headers }
+                        );
+                        console.log(`✅ Item ${item.id} supprimé de SharePoint (Items).`);
+                        success = true;
                     } catch (error) {
                         attempt++;
                         if (attempt === MAX_RETRIES) {
-                            console.error(`❌ Échec final de suppression du batch ${Math.floor(i / BATCH_SIZE) + 1} (Items) après ${MAX_RETRIES} tentatives:`, error.message);
-                            throw error;
+                            throw new Error(`Échec final de suppression de l'item ${item.id} après ${MAX_RETRIES} tentatives: ${error.message}`);
                         }
-                        if (error.message !== 'Throttled') {
-                            console.log(`⚠️ Erreur non récupérable, passage au batch suivant (Items).`);
-                            batchSuccess = true;
-                        } else {
+                        if (error.response?.status === 429 || error.response?.data?.error?.code === 'activityLimitReached') {
                             const delay = INITIAL_DELAY_MS * Math.pow(2, attempt - 1);
-                            console.log(`⚠️ Throttling détecté. Retente ${attempt}/${MAX_RETRIES} après ${delay}ms...`);
+                            console.log(`⚠️ Throttling détecté. Attente de ${delay}ms avant la tentative ${attempt + 1}/${MAX_RETRIES}...`);
                             await wait(delay);
+                        } else {
+                            throw error;
                         }
                     }
                 }
-                if (i + BATCH_SIZE < items.length) {
-                    console.log(`⏳ Pause de ${BATCH_DELAY_MS}ms avant le prochain batch de suppression (Items)...`);
-                    await wait(BATCH_DELAY_MS);
-                }
+                // Removed the delay here: if (i < items.length - 1) await wait(BATCH_DELAY_MS);
             }
-            console.log(`✅ Tous les items SharePoint (Items) ont été traités (quelques suppressions ignorées si non trouvées).`);
+
+            // Verify deletion
+            let remainingItems = [];
+            url = `https://graph.microsoft.com/v1.0/sites/${SITE_ID}/lists/${listId}/items?expand=fields`;
+            while (url) {
+                const response = await axios.get(url, { headers });
+                remainingItems = remainingItems.concat(response.data.value);
+                url = response.data['@odata.nextLink'];
+            }
+            if (remainingItems.length > 0) {
+                throw new Error(`Échec de suppression complète: ${remainingItems.length} items restants. IDs restants: ${remainingItems.map(item => item.id).join(', ')}`);
+            }
+            console.log(`✅ Confirmation: Aucun item restant dans SharePoint (Items).`);
         } else {
             console.log(`⚠️ Aucun item à supprimer dans SharePoint (Items).`);
         }
@@ -712,90 +678,302 @@ const replaceSharePointWithGeniusItems = async () => {
         const insertionStart = Date.now();
         const [geniusData] = await db.execute(`SELECT * FROM ${tableName}`);
         if (geniusData.length === 0) {
-            console.log(`⚠️ Aucune donnée trouvée dans la table ${tableName}.`);
             insertionDuration = Date.now() - insertionStart;
-            console.log(`⏱️ Temps d'insertion (Items): ${formatDuration(insertionDuration)}`);
-            return { deletionDuration, insertionDuration };
+            return {
+                message: `⚠️ Aucune donnée trouvée dans la table ${tableName}.`,
+                deletionDuration,
+                insertionDuration
+            };
         }
 
-        for (let i = 0; i < geniusData.length; i += BATCH_SIZE) {
-            const batchItems = geniusData.slice(i, i + BATCH_SIZE);
+        for (let i = 0; i < geniusData.length; i++) {
+            const item = geniusData[i];
             let attempt = 0;
-            let batchSuccess = false;
+            let success = false;
 
-            while (attempt < MAX_RETRIES && !batchSuccess) {
+            while (attempt < MAX_RETRIES && !success) {
                 try {
-                    const batchRequest = {
-                        requests: batchItems.map((item, index) => {
-                            const fields = {
-                                Title: item.Title,
-                                field_1: item.item,
-                                field_2: item.Family,
-                                field_3: item.Description,
-                                field_4: item.Specification1,
-                                field_5: Number(item.Prix_Der),
-                                field_6: Number(item.Prix_Moyen),
-                                field_7: item.Unit,
-                                field_8: item.UnitDesc
-                            };
-                            return {
-                                id: `${index}`,
-                                method: 'POST',
-                                url: `/sites/${SITE_ID}/lists/${listId}/items`,
-                                headers: { 'Content-Type': 'application/json' },
-                                body: { fields }
-                            };
-                        })
+                    const fields = {
+                        Title: item.Title,
+                        field_1: item.item,
+                        field_2: item.Family,
+                        field_3: item.Description,
+                        field_4: item.Specification1,
+                        field_5: Number(item.Prix_Der),
+                        field_6: Number(item.Prix_Moyen),
+                        field_7: item.Unit,
+                        field_8: item.UnitDesc
                     };
-
-                    const batchResponse = await axios.post('https://graph.microsoft.com/v1.0/$batch', batchRequest, { headers });
-                    let allInserted = true;
-                    batchResponse.data.responses.forEach((resp, idx) => {
-                        if (resp.status === 201) {
-                            console.log(`✅ Item inséré dans SharePoint (Items): ${batchItems[idx].Title}`);
-                        } else if (resp.status === 429 || (resp.body?.error?.code === 'activityLimitReached')) {
-                            allInserted = false;
-                            throw new Error('Throttled');
-                        } else {
-                            allInserted = false;
-                            console.error(`❌ Échec de l'insertion de l'item (Items):`, resp.body?.error || resp.status);
-                            throw new Error(`Échec de l'insertion: ${resp.body?.error?.message || resp.status}`);
-                        }
-                    });
-                    if (allInserted) batchSuccess = true;
+                    await axios.post(
+                        `https://graph.microsoft.com/v1.0/sites/${SITE_ID}/lists/${listId}/items`,
+                        { fields },
+                        { headers }
+                    );
+                    console.log(`✅ Item ${item.Title} inséré dans SharePoint (Items).`);
+                    success = true;
                 } catch (error) {
                     attempt++;
                     if (attempt === MAX_RETRIES) {
-                        console.error(`❌ Échec final de l'insertion du batch ${Math.floor(i / BATCH_SIZE) + 1} (Items) après ${MAX_RETRIES} tentatives:`, error.message);
+                        throw new Error(`Échec final de l'insertion de l'item ${item.Title} après ${MAX_RETRIES} tentatives: ${error.message}`);
+                    }
+                    if (error.response?.status === 429 || error.response?.data?.error?.code === 'activityLimitReached') {
+                        const delay = INITIAL_DELAY_MS * Math.pow(2, attempt - 1);
+                        console.log(`⚠️ Throttling détecté. Attente de ${delay}ms avant la tentative ${attempt + 1}/${MAX_RETRIES}...`);
+                        await wait(delay);
+                    } else {
                         throw error;
                     }
-                    const delay = INITIAL_DELAY_MS * Math.pow(2, attempt - 1);
-                    console.log(`⚠️ Throttling détecté. Retente ${attempt}/${MAX_RETRIES} après ${delay}ms...`);
-                    await wait(delay);
                 }
             }
-            if (i + BATCH_SIZE < geniusData.length) {
-                console.log(`⏳ Pause de ${BATCH_DELAY_MS}ms avant le prochain batch d'insertion (Items)...`);
-                await wait(BATCH_DELAY_MS);
-            }
+            // Removed the delay here: if (i < geniusData.length - 1) await wait(BATCH_DELAY_MS);
         }
         console.log(`✅ ${geniusData.length} items de ${tableName} insérés dans SharePoint (Items).`);
         insertionDuration = Date.now() - insertionStart;
         console.log(`⏱️ Temps d'insertion (Items): ${formatDuration(insertionDuration)}`);
 
-        return { deletionDuration, insertionDuration };
+        return {
+            message: `✅ ${geniusData.length} items insérés avec succès`,
+            deletionDuration,
+            insertionDuration
+        };
     } catch (error) {
         console.error(`❌ Erreur lors de la synchronisation Genius avec SharePoint (Items):`, error.message);
         throw error;
     }
 };
 
+// New SharePoint Sync Function for Tbl_Loc
+const syncSharePointLocData = async () => {
+    const tableName = 'sharepoint_Tbl_Loc';
+    try {
+        const token = await getAccessToken();
+        const headers = { Authorization: `Bearer ${token}`, Accept: 'application/json' };
+        let items = [];
+        let url = `https://graph.microsoft.com/v1.0/sites/${SITE_ID}/lists/${LIST_ID_LOC}/items?expand=fields`;
+
+        while (url) {
+            const response = await axios.get(url, { headers });
+            items = items.concat(response.data.value);
+            url = response.data['@odata.nextLink'];
+        }
+
+        if (items.length > 0) {
+            await createTableIfNotExists(items[0].fields, tableName, fieldMappingsLoc);
+            await ensureColumnsExist(items, tableName, fieldMappingsLoc);
+            await insertOrUpdateItems(items, tableName, fieldMappingsLoc, true);
+            console.log(`✅ ${items.length} items SharePoint stockés dans ${tableName}.`);
+        } else {
+            console.log("⚠️ Aucun item trouvé dans SharePoint (Tbl_Loc).");
+        }
+    } catch (error) {
+        console.error("❌ Erreur lors de la synchronisation SharePoint (Tbl_Loc):", error.message);
+        throw error;
+    }
+};
+
+// New Genius Sync Function for Tbl_Loc
+const syncGeniusLocData = async () => {
+    const tableName = 'genius_Tbl_Loc';
+    try {
+        const connection = await connectODBC();
+        const sql = `
+            SELECT 
+                loc.Code, loc.Location, loc.Des
+            FROM Localisations loc 
+            WHERE LCN_Active=1 AND LCN_CategoryCode='FIXED' AND Des3 = ''
+        `;
+        const result = await connection.query(sql);
+        await connection.close();
+
+        const geniusData = result.map(row => {
+            const decodeWith = (encoding) => {
+                return {
+                    Code: typeof row.Code === 'string' ? iconv.decode(Buffer.from(row.Code, 'binary'), encoding) : row.Code,
+                    Location: typeof row.Location === 'string' ? iconv.decode(Buffer.from(row.Location, 'binary'), encoding) : row.Location,
+                    Des: typeof row.Des === 'string' ? iconv.decode(Buffer.from(row.Des, 'binary'), encoding) : row.Des
+                };
+            };
+
+            const cp850Decoded = decodeWith('cp850');
+            return {
+                Code: cp850Decoded.Code,
+                Location: cp850Decoded.Location,
+                Des: cp850Decoded.Des
+            };
+        });
+
+        if (geniusData.length > 0) {
+            await db.execute(`DROP TABLE IF EXISTS \`${tableName}\``);
+            const columns = [
+                'id INT PRIMARY KEY AUTO_INCREMENT',
+                '`Code` TEXT',
+                '`Location` TEXT',
+                '`Des` TEXT'
+            ];
+            const createSql = `CREATE TABLE \`${tableName}\` (
+                ${columns.join(',\n        ')}
+            )`;
+            await db.execute(createSql);
+            console.log(`✅ Table ${tableName} supprimée et recréée avec succès.`);
+
+            for (const item of geniusData) {
+                const columns = ['Code', 'Location', 'Des'];
+                const values = [item.Code, item.Location, item.Des];
+                const sql = `INSERT INTO \`${tableName}\` (${columns.map(col => `\`${col}\``).join(', ')})
+                            VALUES (${columns.map(() => '?').join(', ')})
+                            ON DUPLICATE KEY UPDATE ${columns.map(col => `\`${col}\` = VALUES(\`${col}\`)`).join(', ')}`;
+                await db.execute(sql, values);
+            }
+            console.log(`✅ ${geniusData.length} items Genius stockés dans ${tableName}.`);
+        } else {
+            console.log("⚠️ Aucune donnée trouvée dans Genius (genius_Tbl_Loc).");
+        }
+    } catch (error) {
+        console.error("❌ Erreur lors de la synchronisation Genius (genius_Tbl_Loc):", error.message);
+        throw error;
+    }
+};
+
+// New Replacement Function for Tbl_Loc
+const replaceSharePointWithGeniusLoc = async () => {
+    const tableName = 'genius_Tbl_Loc';
+    const listId = LIST_ID_LOC;
+    let deletionDuration = 0;
+    let insertionDuration = 0;
+
+    try {
+        const token = await getAccessToken();
+        const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+        // Deletion Phase
+        const deletionStart = Date.now();
+        let items = [];
+        let url = `https://graph.microsoft.com/v1.0/sites/${SITE_ID}/lists/${listId}/items?expand=fields`;
+        while (url) {
+            const response = await axios.get(url, { headers });
+            items = items.concat(response.data.value);
+            url = response.data['@odata.nextLink'];
+        }
+
+        if (items.length > 0) {
+            for (let i = 0; i < items.length; i++) {
+                const item = items[i];
+                let attempt = 0;
+                let success = false;
+
+                while (attempt < MAX_RETRIES && !success) {
+                    try {
+                        await axios.delete(
+                            `https://graph.microsoft.com/v1.0/sites/${SITE_ID}/lists/${listId}/items/${item.id}`,
+                            { headers }
+                        );
+                        console.log(`✅ Item ${item.id} supprimé de SharePoint (Loc).`);
+                        success = true;
+                    } catch (error) {
+                        attempt++;
+                        if (attempt === MAX_RETRIES) {
+                            throw new Error(`Échec final de suppression de l'item ${item.id} après ${MAX_RETRIES} tentatives: ${error.message}`);
+                        }
+                        if (error.response?.status === 429 || error.response?.data?.error?.code === 'activityLimitReached') {
+                            const delay = INITIAL_DELAY_MS * Math.pow(2, attempt - 1);
+                            console.log(`⚠️ Throttling détecté. Attente de ${delay}ms avant la tentative ${attempt + 1}/${MAX_RETRIES}...`);
+                            await wait(delay);
+                        } else {
+                            throw error;
+                        }
+                    }
+                }
+            }
+
+            // Verify deletion
+            let remainingItems = [];
+            url = `https://graph.microsoft.com/v1.0/sites/${SITE_ID}/lists/${listId}/items?expand=fields`;
+            while (url) {
+                const response = await axios.get(url, { headers });
+                remainingItems = remainingItems.concat(response.data.value);
+                url = response.data['@odata.nextLink'];
+            }
+            if (remainingItems.length > 0) {
+                throw new Error(`Échec de suppression complète: ${remainingItems.length} items restants. IDs restants: ${remainingItems.map(item => item.id).join(', ')}`);
+            }
+            console.log(`✅ Confirmation: Aucun item restant dans SharePoint (Loc).`);
+        } else {
+            console.log(`⚠️ Aucun item à supprimer dans SharePoint (Loc).`);
+        }
+        deletionDuration = Date.now() - deletionStart;
+        console.log(`⏱️ Temps de suppression (Loc): ${formatDuration(deletionDuration)}`);
+
+        // Insertion Phase
+        const insertionStart = Date.now();
+        const [geniusData] = await db.execute(`SELECT * FROM ${tableName}`);
+        if (geniusData.length === 0) {
+            insertionDuration = Date.now() - insertionStart;
+            return {
+                message: `⚠️ Aucune donnée trouvée dans la table ${tableName}.`,
+                deletionDuration,
+                insertionDuration
+            };
+        }
+
+        for (let i = 0; i < geniusData.length; i++) {
+            const item = geniusData[i];
+            let attempt = 0;
+            let success = false;
+
+            while (attempt < MAX_RETRIES && !success) {
+                try {
+                    const fields = {
+                        Title: item.Code,
+                        field_1: item.Location,
+                        field_2: item.Des
+                    };
+                    await axios.post(
+                        `https://graph.microsoft.com/v1.0/sites/${SITE_ID}/lists/${listId}/items`,
+                        { fields },
+                        { headers }
+                    );
+                    console.log(`✅ Item ${item.Code} inséré dans SharePoint (Loc).`);
+                    success = true;
+                } catch (error) {
+                    attempt++;
+                    if (attempt === MAX_RETRIES) {
+                        throw new Error(`Échec final de l'insertion de l'item ${item.Code} après ${MAX_RETRIES} tentatives: ${error.message}`);
+                    }
+                    if (error.response?.status === 429 || error.response?.data?.error?.code === 'activityLimitReached') {
+                        const delay = INITIAL_DELAY_MS * Math.pow(2, attempt - 1);
+                        console.log(`⚠️ Throttling détecté. Attente de ${delay}ms avant la tentative ${attempt + 1}/${MAX_RETRIES}...`);
+                        await wait(delay);
+                    } else {
+                        throw error;
+                    }
+                }
+            }
+        }
+        console.log(`✅ ${geniusData.length} items de ${tableName} insérés dans SharePoint (Loc).`);
+        insertionDuration = Date.now() - insertionStart;
+        console.log(`⏱️ Temps d'insertion (Loc): ${formatDuration(insertionDuration)}`);
+
+        return {
+            message: `✅ ${geniusData.length} items insérés avec succès`,
+            deletionDuration,
+            insertionDuration
+        };
+    } catch (error) {
+        console.error(`❌ Erreur lors de la synchronisation Genius avec SharePoint (Loc):`, error.message);
+        throw error;
+    }
+};
+
+// Update module.exports to include new functions
 module.exports = {
     syncSharePointData,
     syncSharePointItemsData,
     syncGeniusData,
     syncGeniusItemsData,
+    syncSharePointLocData, // Add new function
+    syncGeniusLocData,    // Add new function
     addSharePointItem,
     replaceSharePointWithGeniusInvItems,
-    replaceSharePointWithGeniusItems
+    replaceSharePointWithGeniusItems,
+    replaceSharePointWithGeniusLoc // Add new function
 };
